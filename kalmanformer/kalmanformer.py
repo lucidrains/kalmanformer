@@ -95,15 +95,13 @@ class KalmanFormer(Module):
         H_k             # (b, obs_dim, state_dim)
     ):
         if exists(F_k):
-            if F_k.ndim == 2:
-                F_k = rearrange(F_k, 'i j -> 1 i j')
+            F_k, _ = pack([F_k], '* i j')
             x_prior = einsum('b i j, b j -> b i', F_k, x_prev_post)
         else:
             x_prior = self.learned_F(x_prev_post)
 
         if exists(H_k):
-            if H_k.ndim == 2:
-                H_k = rearrange(H_k, 'i j -> 1 i j')
+            H_k, _ = pack([H_k], '* i j')
             z_prior = einsum('b i j, b j -> b i', H_k, x_prior)
         else:
             z_prior = self.learned_H(x_prior)
@@ -147,27 +145,15 @@ class KalmanFormer(Module):
 
         x_prev_post = default(x_0, torch.zeros(b, self.state_dim, device = device))
         x_prev_prior = x_prev_post.clone()
+        z_prev = observations[:, 0]
 
-        if exists(H):
-            if H.ndim == 4:
-                z_prev = einsum('b i j, b j -> b i', H[:, 0], x_prev_post)
-            else:
-                z_prev = einsum('i j, b j -> b i', H, x_prev_post)
-        else:
-            z_prev = self.learned_H(x_prev_post)
+        post_states = [x_prev_post]
 
-        post_states = []
-
-        for k in range(seq_len):
+        for k in range(1, seq_len):
             z_k = observations[:, k]
 
-            F_k = H_k = None
-
-            if exists(F):
-                F_k = F[:, k] if F.ndim == 4 else F
-
-            if exists(H):
-                H_k = H[:, k] if H.ndim == 4 else H
+            F_k = F[:, k - 1] if exists(F) and F.ndim == 4 else F
+            H_k = H[:, k] if exists(H) and H.ndim == 4 else H
 
             x_post, x_prior, K_k = self.step(
                 z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k

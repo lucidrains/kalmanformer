@@ -93,14 +93,14 @@ def run_ekf(observations, F_seq, H, Q, R, x0):
     device = observations.device
     state_dim = x0.shape[1]
 
-    post_states = []
+    post_states = [x0]
 
     x_post = x0
-    P_post = repeat(torch.eye(state_dim, device = device), 'i j -> b i j', b = b)
+    P_post = torch.zeros(b, state_dim, state_dim, device = device)
 
-    for k in range(seq_len):
+    for k in range(1, seq_len):
         z_k = observations[:, k]
-        F_k = F_seq[:, k]
+        F_k = F_seq[:, k - 1]
 
         x_prior = einsum('b i j, b j -> b i', F_k, x_post)
         P_prior = einsum('b i j, b j k -> b i k', F_k, P_post)
