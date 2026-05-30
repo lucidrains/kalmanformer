@@ -14,21 +14,20 @@
 # ///
 
 import numpy as np
+from typing import Literal
 from scipy.integrate import odeint
 
 import torch
-from torch import einsum, tensor
+from torch import tensor
 from torch.utils.data import TensorDataset, DataLoader
 import torch.nn.functional as F
 from torch.optim import Adam
-
-from einops import repeat
 
 import fire
 import wandb
 from accelerate import Accelerator
 
-from kalmanformer import KalmanFormer
+from kalmanformer import KalmanFormer, ExtendedKalmanFilter
 
 # lorenz attractor
 
@@ -88,46 +87,6 @@ def generate_dataset(num_trajectories = 100, T = 5., dt = 0.05, process_noise_st
         tensor(np.array(dataset_F), dtype = torch.float32)
     )
 
-# extended kalman filter baseline
-
-def run_ekf(observations, F_seq, H, Q, R, x0):
-    b, seq_len, _ = observations.shape
-    device = observations.device
-    state_dim = x0.shape[1]
-
-    post_states = [x0]
-
-    x_post = x0
-    P_post = torch.zeros(b, state_dim, state_dim, device = device)
-
-    for k in range(1, seq_len):
-        z_k = observations[:, k]
-        F_k = F_seq[:, k - 1]
-
-        x_prior = einsum('b i j, b j -> b i', F_k, x_post)
-        P_prior = einsum('b i j, b j k -> b i k', F_k, P_post)
-        P_prior = einsum('b i j, b k j -> b i k', P_prior, F_k) + Q
-
-        S = einsum('i j, b j k -> b i k', H, P_prior)
-        S = einsum('b i j, k j -> b i k', S, H) + R
-
-        S_inv = torch.inverse(S)
-        K_k = einsum('b i j, k j -> b i k', P_prior, H)
-        K_k = einsum('b i j, b j k -> b i k', K_k, S_inv)
-
-        z_prior = einsum('i j, b j -> b i', H, x_prior)
-        innovation = z_k - z_prior
-
-        x_post = x_prior + einsum('b i j, b j -> b i', K_k, innovation)
-
-        I = repeat(torch.eye(state_dim, device = device), 'i j -> b i j', b = b)
-        KH = einsum('b i j, j k -> b i k', K_k, H)
-        P_post = einsum('b i j, b j k -> b i k', I - KH, P_prior)
-
-        post_states.append(x_post)
-
-    return torch.stack(post_states, dim = 1)
-
 # training script
 
 def train(
@@ -143,9 +102,10 @@ def train(
     use_kalmanformer: bool = True,
     learn_dynamics: bool = False,
     use_memory: bool = False,
-    cpu: bool = False
+    cpu: bool = False,
+    base_estimator_type: Literal['none', 'kf', 'ekf'] = 'none'
 ):
-    # trains and evaluates KalmanFormer vs EKF on the Lorenz Attractor toy task
+    assert base_estimator_type in ('none', 'kf', 'ekf'), "base_estimator_type must be 'none', 'kf', or 'ekf'"
 
     accelerator = Accelerator(cpu = cpu)
     device = accelerator.device
@@ -162,26 +122,43 @@ def train(
     test_states, test_obs, test_F = test_states.to(device), test_obs.to(device), test_F.to(device)
 
     H = torch.eye(3, device = device)
-
-    # baseline EKF
-
     Q = torch.eye(3, device = device) * 0.8**2
     R = torch.eye(3, device = device) * 1.0**2
 
+    fixed_F = torch.tensor(get_jacobian([0., 0., 0.], dt, pseudo_linear=True), dtype=torch.float32, device=device)
+
+    use_fixed_F = base_estimator_type == 'kf'
+
+    # baseline EKF
+
     accelerator.print('\nrunning ekf baseline...\n')
-    ekf_test_preds = run_ekf(test_obs, test_F, H, Q, R, test_states[:, 0])
+    ekf_model = ExtendedKalmanFilter(state_dim = 3, obs_dim = 3, Q = Q, R = R).to(device)
+    ekf_test_preds = ekf_model(test_obs, test_F, H, x_0 = test_states[:, 0])
     ekf_mse = F.mse_loss(ekf_test_preds, test_states)
     accelerator.print(f'ekf test mse: {ekf_mse.item():.4f}')
 
     if use_wandb and accelerator.is_main_process:
         wandb.log({'test/ekf_mse': ekf_mse.item()})
 
+    # baseline KF
+
+    accelerator.print('\nrunning kf baseline...\n')
+    kf_model = ExtendedKalmanFilter(state_dim = 3, obs_dim = 3, Q = Q, R = R).to(device)
+    kf_test_preds = kf_model(test_obs, fixed_F, H, x_0 = test_states[:, 0])
+    kf_mse = F.mse_loss(kf_test_preds, test_states)
+    accelerator.print(f'kf test mse: {kf_mse.item():.4f}')
+
     if not use_kalmanformer:
         return
 
     # kalmanformer
 
-    accelerator.print(f'\ntraining kalmanformer (use_memory={use_memory})...\n')
+    if base_estimator_type == 'none':
+        base_model = None
+    else:
+        base_model = ExtendedKalmanFilter(state_dim = 3, obs_dim = 3, Q = Q, R = R)
+
+    accelerator.print(f'\ntraining kalmanformer (base={base_estimator_type}, memory={use_memory})...\n')
 
     model = KalmanFormer(
         state_dim = 3,
@@ -190,7 +167,8 @@ def train(
         depth = 2,
         heads = 2,
         learn_dynamics = learn_dynamics,
-        use_memory = use_memory
+        use_memory = use_memory,
+        base_estimator = base_model
     )
 
     optimizer = Adam(model.parameters(), lr = learning_rate, weight_decay = weight_decay)
@@ -208,7 +186,7 @@ def train(
 
             preds = model(
                 obs,
-                F = None if learn_dynamics else F_seq,
+                F = None if learn_dynamics else (fixed_F if use_fixed_F else F_seq),
                 H = None if learn_dynamics else H,
                 x_0 = states[:, 0]
             )
@@ -239,20 +217,21 @@ def train(
     model.eval()
 
     with torch.no_grad():
-        kf_test_preds = model(
+        test_preds = model(
             test_obs,
-            F = None if learn_dynamics else test_F,
+            F = None if learn_dynamics else (fixed_F if use_fixed_F else test_F),
             H = None if learn_dynamics else H,
             x_0 = test_states[:, 0]
         )
-        kf_mse = F.mse_loss(kf_test_preds, test_states)
+        test_mse = F.mse_loss(test_preds, test_states)
 
-    accelerator.print(f'kalmanformer test mse: {kf_mse.item():.4f}')
-    accelerator.print(f'ekf test mse:          {ekf_mse.item():.4f}')
-    accelerator.print('\n')
+    accelerator.print(f'kalmanformer (base={base_estimator_type}) test mse: {test_mse.item():.4f}')
+    accelerator.print(f'ekf test mse: {ekf_mse.item():.4f}')
+    accelerator.print(f'kf test mse:  {kf_mse.item():.4f}')
+    accelerator.print('')
 
     if use_wandb and accelerator.is_main_process:
-        wandb.log({'test/kf_mse': kf_mse.item()})
+        wandb.log({'test/kalmanformer_mse': test_mse.item()})
 
 if __name__ == '__main__':
     fire.Fire(train)
