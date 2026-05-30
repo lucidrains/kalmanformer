@@ -43,13 +43,15 @@ def lorenz_deriv(state, t):
 # computes the state transition matrix F_k using Taylor expansion
 # F_k = I + \sum_{j=1}^5 (A(x_k) \Delta t)^j / j!
 
-def get_jacobian(state, dt, order = 5):
+def get_jacobian(state, dt, order = 5, pseudo_linear = True):
     x, y, z = state
+
+    x_ = 0. if pseudo_linear else x
 
     A = np.array([
         [-10., 10., 0.],
-        [28. - z, -1., 0.],
-        [y, 0., -8. / 3.]
+        [28. - z, -1., -x_],
+        [y, x_, -8. / 3.]
     ])
 
     A_dt = A * dt

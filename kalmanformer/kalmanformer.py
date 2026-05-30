@@ -128,8 +128,7 @@ class KalmanFormer(Module):
         K_k_flat = self.to_kalman_gain(dec_flat)
         K_k = rearrange(K_k_flat, 'b (i j) -> b i j', i = self.state_dim, j = self.obs_dim)
 
-        innovation = z_k - z_prior
-        update = einsum('b i j, b j -> b i', K_k, innovation)
+        update = einsum('b i j, b j -> b i', K_k, innov_diff)
         x_post = x_prior + update
 
         return x_post, x_prior, K_k
@@ -141,28 +140,27 @@ class KalmanFormer(Module):
         H,              # (obs_dim, state_dim) or (b, seq, obs_dim, state_dim)
         x_0 = None      # (b, state_dim)
     ):
-        b, seq_len, _, device = *observations.shape, observations.device
+        b, device = observations.shape[0], observations.device
 
         x_prev_post = default(x_0, torch.zeros(b, self.state_dim, device = device))
         x_prev_prior = x_prev_post.clone()
-        z_prev = observations[:, 0]
+
+        observations = observations.unbind(dim = 1)
+        z_prev = observations[0]
 
         post_states = [x_prev_post]
 
-        for k in range(1, seq_len):
-            z_k = observations[:, k]
+        for k, z_k in enumerate(observations[1:], start = 1):
 
             F_k = F[:, k - 1] if exists(F) and F.ndim == 4 else F
             H_k = H[:, k] if exists(H) and H.ndim == 4 else H
 
-            x_post, x_prior, K_k = self.step(
+            x_prev_post, x_prev_prior, K_k = self.step(
                 z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k
             )
 
-            post_states.append(x_post)
+            post_states.append(x_prev_post)
 
             z_prev = z_k
-            x_prev_post = x_post
-            x_prev_prior = x_prior
 
         return stack(post_states, dim = 1)
