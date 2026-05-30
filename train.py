@@ -17,7 +17,7 @@ import numpy as np
 from scipy.integrate import odeint
 
 import torch
-from torch import nn, einsum, tensor
+from torch import einsum, tensor
 from torch.utils.data import TensorDataset, DataLoader
 import torch.nn.functional as F
 from torch.optim import Adam
@@ -29,11 +29,6 @@ import wandb
 from accelerate import Accelerator
 
 from kalmanformer import KalmanFormer
-
-# helper functions
-
-def exists(v):
-    return v is not None
 
 # lorenz attractor
 
