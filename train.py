@@ -142,6 +142,7 @@ def train(
     weight_decay: float = 1e-3,
     use_kalmanformer: bool = True,
     learn_dynamics: bool = False,
+    use_memory: bool = False,
     cpu: bool = False
 ):
     # trains and evaluates KalmanFormer vs EKF on the Lorenz Attractor toy task
@@ -180,7 +181,7 @@ def train(
 
     # kalmanformer
 
-    accelerator.print('\ntraining kalmanformer...\n')
+    accelerator.print(f'\ntraining kalmanformer (use_memory={use_memory})...\n')
 
     model = KalmanFormer(
         state_dim = 3,
@@ -188,7 +189,8 @@ def train(
         dim = 64,
         depth = 2,
         heads = 2,
-        learn_dynamics = learn_dynamics
+        learn_dynamics = learn_dynamics,
+        use_memory = use_memory
     )
 
     optimizer = Adam(model.parameters(), lr = learning_rate, weight_decay = weight_decay)
