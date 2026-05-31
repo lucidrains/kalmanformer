@@ -178,13 +178,12 @@ class KalmanFormer(BaseStateEstimator):
 
         update = einsum('b i j, b j -> b i', K_k, innov_diff)
 
-        # residual on base, or direct update on prior
+        # kalman update
 
-        if has_base:
-            x_post = base_x_post + update
-            next_mems = (base_mems, transformer_mems)
-        else:
-            x_post = x_prior + update
-            next_mems = transformer_mems
+        x_post = x_prior + update
+
+        # next mems
+
+        next_mems = (base_mems, transformer_mems) if has_base else transformer_mems
 
         return x_post, x_prior, K_k, next_mems
