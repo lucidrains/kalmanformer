@@ -120,6 +120,11 @@ class KalmanFormer(BaseStateEstimator):
         else:
             base_mems, transformer_mems = None, mems
 
+        if self.use_memory:
+            obs_mems, state_mems = transformer_mems if exists(transformer_mems) else (None, None)
+        else:
+            obs_mems, state_mems = None, None
+
         # predict prior state (from base estimator or dynamics model)
 
         if has_base:
@@ -145,7 +150,11 @@ class KalmanFormer(BaseStateEstimator):
             self.proj_innov_diff(innov_diff),
         ), dim = 1)
 
-        enc_out = self.obs_encoder(enc_in)
+        if self.use_memory:
+            enc_out, obs_intermediates = self.obs_encoder(enc_in, mems = obs_mems, return_hiddens = True)
+            next_obs_mems = obs_intermediates.hiddens
+        else:
+            enc_out = self.obs_encoder(enc_in)
 
         # state decoder
 
@@ -161,11 +170,12 @@ class KalmanFormer(BaseStateEstimator):
         dec_in = stack(state_tokens, dim = 1)
 
         if self.use_memory:
-            dec_out, intermediates = self.state_encoder(dec_in, context = enc_out, mems = transformer_mems, return_hiddens = True)
-            transformer_mems = intermediates.hiddens
+            dec_out, state_intermediates = self.state_encoder(dec_in, context = enc_out, mems = state_mems, return_hiddens = True)
+            next_state_mems = state_intermediates.hiddens
+            next_transformer_mems = (next_obs_mems, next_state_mems)
         else:
             dec_out = self.state_encoder(dec_in, context = enc_out)
-            transformer_mems = None
+            next_transformer_mems = None
 
         # predict kalman gain and apply update
 
@@ -184,6 +194,6 @@ class KalmanFormer(BaseStateEstimator):
 
         # next mems
 
-        next_mems = (base_mems, transformer_mems) if has_base else transformer_mems
+        next_mems = (base_mems, next_transformer_mems) if has_base else next_transformer_mems
 
         return x_post, x_prior, K_k, next_mems
