@@ -17,7 +17,7 @@ def default(v, d):
 
 class BaseStateEstimator(Module):
 
-    def step(self, z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k, mems = None):
+    def step(self, z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k, mems = None, step = None):
         raise NotImplementedError
 
     def forward(
@@ -61,9 +61,9 @@ class BaseStateEstimator(Module):
             iter_F = F_seq[:-1]
             iter_H = H_seq[1:]
 
-        for z_k, F_k, H_k in zip(iter_obs, iter_F, iter_H):
+        for step, (z_k, F_k, H_k) in enumerate(zip(iter_obs, iter_F, iter_H)):
             x_prev_post, x_prev_prior, _, mems = self.step(
-                z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k, mems = mems
+                z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k, mems = mems, step = step
             )
             post_states.append(x_prev_post)
             z_prev = z_k
@@ -101,7 +101,8 @@ class ExtendedKalmanFilter(BaseStateEstimator):
         x_prev_prior,
         F_k,
         H_k,
-        mems = None
+        mems = None,
+        step = None
     ):
         b = z_k.shape[0]
 

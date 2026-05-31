@@ -4,8 +4,17 @@ from einops import rearrange
 
 from x_transformers import Encoder
 from x_mlps_pytorch import create_mlp
+from torch_einops_utils import tree_map_tensor
 
 from kalmanformer.state_estimators import BaseStateEstimator, exists, default
+
+# helpers
+
+def divisible_by(num, den):
+    return (num % den) == 0
+
+def detach_mems(mems):
+    return tree_map_tensor(lambda t: t.detach(), mems)
 
 # kalmanformer
 
@@ -24,9 +33,10 @@ class KalmanFormer(BaseStateEstimator):
         mlp_dim = None,
         enc_kwargs: dict | None = None,
         dec_kwargs: dict | None = None,
-        learn_dynamics: bool = False,
-        use_memory: bool = False,
-        base_estimator: BaseStateEstimator | None = None
+        learn_dynamics = False,
+        use_memory = False,
+        base_estimator: BaseStateEstimator | None = None,
+        detach_mems_every = 2
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -34,6 +44,9 @@ class KalmanFormer(BaseStateEstimator):
         self.learn_dynamics = learn_dynamics
         self.use_memory = use_memory
         self.base_estimator = base_estimator
+
+        self.detach_mems_every = detach_mems_every
+        self.should_detach_mems = detach_mems_every > 0
 
         mlp_dim = default(mlp_dim, dim)
         enc_kwargs = default(enc_kwargs, dict())
@@ -109,9 +122,20 @@ class KalmanFormer(BaseStateEstimator):
         x_prev_prior,   # (b, state_dim)
         F_k,            # (state_dim, state_dim) or (b, state_dim, state_dim)
         H_k,            # (obs_dim, state_dim) or (b, obs_dim, state_dim)
-        mems = None
+        mems = None,
+        step = None
     ):
         has_base = exists(self.base_estimator)
+
+        should_detach = (
+            self.should_detach_mems
+            and exists(step)
+            and step > 0
+            and divisible_by(step, self.detach_mems_every)
+        )
+
+        if should_detach:
+            mems = detach_mems(mems)
 
         # unpack mems
 
