@@ -120,8 +120,8 @@ class KalmanFormer(BaseStateEstimator):
         z_prev,         # (b, obs_dim)
         x_prev_post,    # (b, state_dim)
         x_prev_prior,   # (b, state_dim)
-        F_k,            # (state_dim, state_dim) or (b, state_dim, state_dim)
-        H_k,            # (obs_dim, state_dim) or (b, obs_dim, state_dim)
+        F_k,            # Callable[[int], Tensor] | (state_dim, state_dim) | (b, state_dim, state_dim)
+        H_k,            # Callable[[int], Tensor] | (obs_dim, state_dim) | (b, obs_dim, state_dim)
         mems = None,
         step = None
     ):

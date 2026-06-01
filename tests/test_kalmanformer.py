@@ -3,7 +3,8 @@ import torch
 from kalmanformer import KalmanFormer
 
 @pytest.mark.parametrize('use_memory', [False, True])
-def test_kalmanformer(use_memory):
+@pytest.mark.parametrize('use_callables', [False, True])
+def test_kalmanformer(use_memory, use_callables):
     model = KalmanFormer(
         state_dim = 3,
         obs_dim = 3,
@@ -14,12 +15,15 @@ def test_kalmanformer(use_memory):
         use_memory = use_memory
     )
 
-    batch = 2
-    seq_len = 5
-
+    batch, seq_len = 2, 5
     obs = torch.randn(batch, seq_len, 3)
-    F = torch.eye(3)
-    H = torch.eye(3)
+
+    if use_callables:
+        F = lambda step: torch.eye(3)
+        H = lambda step: torch.eye(3)
+    else:
+        F = torch.eye(3)
+        H = torch.eye(3)
 
     preds = model(obs, F = F, H = H)
 

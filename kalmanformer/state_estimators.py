@@ -12,6 +12,15 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def to_callable(obj):
+    if not exists(obj):
+        return None
+    if callable(obj):
+        return obj
+    def _callable(step):
+        return obj[:, step] if obj.ndim == 4 else obj
+    return _callable
+
 # base class - standardized interface for state estimators
 # mems carries whatever internal state the estimator needs between steps
 
@@ -23,20 +32,18 @@ class BaseStateEstimator(Module):
     def forward(
         self,
         observations,       # (b, seq, obs_dim)
-        F,                  # (state_dim, state_dim) or (b, seq, state_dim, state_dim)
-        H,                  # (obs_dim, state_dim) or (b, seq, obs_dim, state_dim)
+        F,                  # callable or (state_dim, state_dim) or (b, seq, state_dim, state_dim)
+        H,                  # callable or (obs_dim, state_dim) or (b, seq, obs_dim, state_dim)
         x_0 = None,         # (b, state_dim)
         initial_state = None,
         return_state = False
     ):
         b, seq_len, _, device = *observations.shape, observations.device
 
-        F_is_seq = exists(F) and F.ndim == 4
-        H_is_seq = exists(H) and H.ndim == 4
+        F_fn = to_callable(F)
+        H_fn = to_callable(H)
 
         obs_seq = observations.unbind(dim = 1)
-        F_seq = F.unbind(dim = 1) if F_is_seq else [F] * seq_len
-        H_seq = H.unbind(dim = 1) if H_is_seq else [H] * seq_len
 
         if exists(initial_state):
             # resume from cached state
@@ -46,8 +53,7 @@ class BaseStateEstimator(Module):
             post_states = []
 
             iter_obs = obs_seq
-            iter_F = F_seq
-            iter_H = H_seq
+            start_seq_idx = 0
         else:
             # fresh start - first observation used as z_prev
 
@@ -58,10 +64,17 @@ class BaseStateEstimator(Module):
             post_states = [x_prev_post]
 
             iter_obs = obs_seq[1:]
-            iter_F = F_seq[:-1]
-            iter_H = H_seq[1:]
+            start_seq_idx = 1
 
-        for step, (z_k, F_k, H_k) in enumerate(zip(iter_obs, iter_F, iter_H)):
+        for step, z_k in enumerate(iter_obs):
+            seq_idx = start_seq_idx + step
+
+            F_idx = seq_idx - 1 if not exists(initial_state) else seq_idx
+            H_idx = seq_idx
+
+            F_k = F_fn(F_idx) if exists(F_fn) else None
+            H_k = H_fn(H_idx) if exists(H_fn) else None
+
             x_prev_post, x_prev_prior, _, mems = self.step(
                 z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k, mems = mems, step = step
             )

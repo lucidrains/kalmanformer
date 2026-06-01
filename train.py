@@ -64,7 +64,14 @@ def get_jacobian(state, dt, order = 5, pseudo_linear = True):
 
     return F
 
-def generate_dataset(num_trajectories = 100, T = 5., dt = 0.05, process_noise_std = 0.05, obs_noise_std = 0.05):
+def generate_dataset(
+    num_trajectories = 100,
+    T = 5.,
+    dt = 0.05,
+    process_noise_std = 0.05,
+    obs_noise_std = 0.05,
+    pseudo_linear = True
+):
     t = np.arange(0, T, dt)
     dataset_states = []
     dataset_obs = []
@@ -75,16 +82,16 @@ def generate_dataset(num_trajectories = 100, T = 5., dt = 0.05, process_noise_st
         states = odeint(lorenz_deriv, x0, t)
 
         observations = states + np.random.normal(0, obs_noise_std, size=states.shape)
-        F_seq = np.array([get_jacobian(state, dt) for state in states])
+        F_seq = np.array([get_jacobian(state, dt, pseudo_linear=pseudo_linear) for state in states])
 
         dataset_states.append(states)
         dataset_obs.append(observations)
         dataset_F.append(F_seq)
 
     return (
-        tensor(np.array(dataset_states), dtype = torch.float32),
-        tensor(np.array(dataset_obs), dtype = torch.float32),
-        tensor(np.array(dataset_F), dtype = torch.float32)
+        tensor(np.stack(dataset_states), dtype = torch.float32),
+        tensor(np.stack(dataset_obs), dtype = torch.float32),
+        tensor(np.stack(dataset_F), dtype = torch.float32)
     )
 
 # training script
@@ -103,7 +110,8 @@ def train(
     learn_dynamics: bool = False,
     use_memory: bool = False,
     cpu: bool = False,
-    base_estimator_type: Literal['none', 'kf', 'ekf'] = 'none'
+    base_estimator_type: Literal['none', 'kf', 'ekf'] = 'none',
+    pseudo_linear: bool = True
 ):
     assert base_estimator_type in ('none', 'kf', 'ekf'), "base_estimator_type must be 'none', 'kf', or 'ekf'"
 
@@ -115,17 +123,18 @@ def train(
 
     accelerator.print('generating dataset...', flush=True)
 
-    train_states, train_obs, train_F = generate_dataset(num_trajectories = num_train_trajectories, T = sequence_length, dt = dt)
-    test_states, test_obs, test_F = generate_dataset(num_trajectories = num_test_trajectories, T = sequence_length, dt = dt)
+    kwargs = dict(num_trajectories = num_train_trajectories, T = sequence_length, dt = dt, pseudo_linear = pseudo_linear)
+    train_states, train_obs, train_F = [t.to(device) for t in generate_dataset(**kwargs)]
 
-    train_states, train_obs, train_F = train_states.to(device), train_obs.to(device), train_F.to(device)
-    test_states, test_obs, test_F = test_states.to(device), test_obs.to(device), test_F.to(device)
+    kwargs.update(num_trajectories = num_test_trajectories)
+    test_states, test_obs, test_F = [t.to(device) for t in generate_dataset(**kwargs)]
 
     H = torch.eye(3, device = device)
     Q = torch.eye(3, device = device) * 0.8**2
     R = torch.eye(3, device = device) * 1.0**2
 
-    fixed_F = torch.tensor(get_jacobian([0., 0., 0.], dt, pseudo_linear=True), dtype=torch.float32, device=device)
+    origin_state = np.zeros(3)
+    fixed_F = tensor(get_jacobian(origin_state, dt, pseudo_linear = pseudo_linear), dtype = torch.float32, device = device)
 
     use_fixed_F = base_estimator_type == 'kf'
 
@@ -184,10 +193,13 @@ def train(
 
         for states, obs, F_seq in dataloader:
 
+            F_arg = None if learn_dynamics else (fixed_F if use_fixed_F else F_seq)
+            H_arg = None if learn_dynamics else H
+
             preds = model(
                 obs,
-                F = None if learn_dynamics else (fixed_F if use_fixed_F else F_seq),
-                H = None if learn_dynamics else H,
+                F = F_arg,
+                H = H_arg,
                 x_0 = states[:, 0]
             )
 
@@ -217,10 +229,13 @@ def train(
     model.eval()
 
     with torch.no_grad():
+        F_arg = None if learn_dynamics else (fixed_F if use_fixed_F else test_F)
+        H_arg = None if learn_dynamics else H
+
         test_preds = model(
             test_obs,
-            F = None if learn_dynamics else (fixed_F if use_fixed_F else test_F),
-            H = None if learn_dynamics else H,
+            F = F_arg,
+            H = H_arg,
             x_0 = test_states[:, 0]
         )
         test_mse = F.mse_loss(test_preds, test_states)
