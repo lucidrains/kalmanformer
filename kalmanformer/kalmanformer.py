@@ -184,8 +184,8 @@ class KalmanFormer(BaseStateEstimator):
             rnn_out, rnn_hiddens = self.dynamics_rnn(rnn_in, rnn_hiddens)
             rnn_out = rearrange(rnn_out, 'b 1 d -> b d')
 
-            F_k = self.to_F(rnn_out) + self.F_identity
-            H_k = self.to_H(rnn_out) + self.H_identity
+            F_k = self.to_F(rnn_out) + (F_k if exists(F_k) else self.F_identity)
+            H_k = self.to_H(rnn_out) + (H_k if exists(H_k) else self.H_identity)
 
         # predict prior state
 
