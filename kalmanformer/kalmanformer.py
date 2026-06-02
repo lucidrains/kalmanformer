@@ -1,6 +1,8 @@
+import torch
 from torch import nn, einsum, stack
 
 from einops import rearrange
+from einops.layers.torch import Rearrange
 
 from x_transformers import Encoder
 from x_mlps_pytorch import create_mlp
@@ -15,6 +17,11 @@ def divisible_by(num, den):
 
 def detach_mems(mems):
     return tree_map_tensor(lambda t: t.detach(), mems)
+
+def init_zero_(layer):
+    nn.init.zeros_(layer.weight)
+    if exists(layer.bias):
+        nn.init.zeros_(layer.bias)
 
 # kalmanformer
 
@@ -54,14 +61,36 @@ class KalmanFormer(BaseStateEstimator):
 
         has_base = exists(base_estimator)
 
+        # learned dynamics via GRU
+
         if learn_dynamics:
-            self.learned_F = create_mlp(
-                dim = dim,
-                depth = 2,
-                dim_in = state_dim,
-                dim_out = state_dim
+            self.dynamics_rnn = nn.GRU(
+                input_size = state_dim,
+                hidden_size = dim,
+                num_layers = 2,
+                batch_first = True
             )
-            self.learned_H = nn.Linear(state_dim, obs_dim, bias = False)
+
+            self.to_F = nn.Sequential(
+                nn.Linear(dim, state_dim * state_dim),
+                Rearrange('b (i j) -> b i j', i = state_dim, j = state_dim)
+            )
+
+            self.to_H = nn.Sequential(
+                nn.Linear(dim, obs_dim * state_dim),
+                Rearrange('b (i j) -> b i j', i = obs_dim, j = state_dim)
+            )
+
+            init_zero_(self.to_F[0])
+            init_zero_(self.to_H[0])
+
+            self.register_buffer('F_identity', torch.eye(state_dim), persistent = False)
+
+            H_identity = torch.zeros(obs_dim, state_dim)
+            min_dim = min(obs_dim, state_dim)
+            H_identity[:min_dim, :min_dim] = torch.eye(min_dim)
+
+            self.register_buffer('H_identity', H_identity, persistent = False)
 
         # observation encoder tokens
 
@@ -111,8 +140,7 @@ class KalmanFormer(BaseStateEstimator):
             dim_out = state_dim * obs_dim
         )
 
-        nn.init.zeros_(self.to_kalman_gain.layers[-1].weight)
-        nn.init.zeros_(self.to_kalman_gain.layers[-1].bias)
+        init_zero_(self.to_kalman_gain.layers[-1])
 
     def step(
         self,
@@ -144,21 +172,31 @@ class KalmanFormer(BaseStateEstimator):
         else:
             base_mems, transformer_mems = None, mems
 
-        if self.use_memory:
-            obs_mems, state_mems = transformer_mems if exists(transformer_mems) else (None, None)
-        else:
+        obs_mems, state_mems, rnn_hiddens = transformer_mems if exists(transformer_mems) else (None, None, None)
+
+        if not self.use_memory:
             obs_mems, state_mems = None, None
 
-        # predict prior state (from base estimator or dynamics model)
+        # learned dynamics
+
+        if self.learn_dynamics:
+            rnn_in = rearrange(x_prev_post, 'b d -> b 1 d')
+            rnn_out, rnn_hiddens = self.dynamics_rnn(rnn_in, rnn_hiddens)
+            rnn_out = rearrange(rnn_out, 'b 1 d -> b d')
+
+            F_k = self.to_F(rnn_out) + self.F_identity
+            H_k = self.to_H(rnn_out) + self.H_identity
+
+        # predict prior state
 
         if has_base:
             base_x_post, x_prior, _, base_mems = self.base_estimator.step(
                 z_k, z_prev, x_prev_post, x_prev_prior, F_k, H_k, mems = base_mems
             )
         else:
-            x_prior = einsum('... i j, ... j -> ... i', F_k, x_prev_post) if exists(F_k) else self.learned_F(x_prev_post)
+            x_prior = einsum('... i j, ... j -> ... i', F_k, x_prev_post)
 
-        z_prior = einsum('... i j, ... j -> ... i', H_k, x_prior) if exists(H_k) else self.learned_H(x_prior)
+        z_prior = einsum('... i j, ... j -> ... i', H_k, x_prior)
 
         # compute difference tokens
 
@@ -179,6 +217,7 @@ class KalmanFormer(BaseStateEstimator):
             next_obs_mems = obs_intermediates.hiddens
         else:
             enc_out = self.obs_encoder(enc_in)
+            next_obs_mems = None
 
         # state decoder
 
@@ -196,10 +235,9 @@ class KalmanFormer(BaseStateEstimator):
         if self.use_memory:
             dec_out, state_intermediates = self.state_encoder(dec_in, context = enc_out, mems = state_mems, return_hiddens = True)
             next_state_mems = state_intermediates.hiddens
-            next_transformer_mems = (next_obs_mems, next_state_mems)
         else:
             dec_out = self.state_encoder(dec_in, context = enc_out)
-            next_transformer_mems = None
+            next_state_mems = None
 
         # predict kalman gain and apply update
 
@@ -218,6 +256,7 @@ class KalmanFormer(BaseStateEstimator):
 
         # next mems
 
+        next_transformer_mems = (next_obs_mems, next_state_mems, rnn_hiddens)
         next_mems = (base_mems, next_transformer_mems) if has_base else next_transformer_mems
 
         return x_post, x_prior, K_k, next_mems
